@@ -1551,17 +1551,8 @@ fi
 AC_SUBST([AM_CFLAGS])
 AC_SUBST([AM_CPPFLAGS])
 
-# ----------------------------------------------------------------------
-# Static Build Detection (Workaround for Issue #1771)
-# ----------------------------------------------------------------------
-# Check if the user requested a static build via --enable-static.
-# If enabled, we define the 'HTOP_STATIC' macro.
-#
-# This macro triggers the "Out-of-Process" lookup logic in UsersTable.c,
-# which prevents Segmentation Faults caused by Glibc's NSS mechanism trying
-# to dynamically load external libraries (like libnss_systemd.so) in a
-# statically linked binary.
-# ----------------------------------------------------------------------
+# Workaround for issue #1771: static builds crash with Glibc NSS.
+# Enable out-of-process UID lookup to avoid unsafe dynamic loading.
 if test "x$enable_static" = "xyes"; then
    AC_DEFINE([HTOP_STATIC], [1], [Define to 1 if building statically to enable NSS crash workaround.])
    AC_MSG_NOTICE([Static build detected: HTOP_STATIC defined to prevent NSS crashes.])

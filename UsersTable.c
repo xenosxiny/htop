@@ -16,6 +16,9 @@ in the source distribution for its full text.
 
 #include "XUtils.h"
 
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 UsersTable* UsersTable_new(void) {
    UsersTable* this;
@@ -29,71 +32,97 @@ void UsersTable_delete(UsersTable* this) {
    free(this);
 }
 
+
 char* UsersTable_getRef(UsersTable* this, unsigned int uid) {
    char* name = Hashtable_get(this->users, uid);
 
    if (name == NULL) {
 
-/* ==============================================================
- * STATIC BUILD PATH (Crash Prevention Logic)
- * This block is compiled ONLY when --enable-static is detected
- * by configure.ac, which defines HTOP_STATIC.
- * ============================================================== */
 #ifdef HTOP_STATIC
-      /* 1. Try resolving standard users with getpwuid (safe range < 65536)
-       * Standard local users are safe to query directly even in static builds.
-       */
-     if (uid < 65536) {
+      // Fast Path: Standard local users (< 65536)
+      if (uid < 65536) {
          const struct passwd* userData = getpwuid(uid);
          if (userData != NULL) {
             name = xStrdup(userData->pw_name);
          }
       }
 
-      /* 2. If not found (or high UID), try resolving via "getent" command.
-       * This "Out-of-Process" lookup avoids crashing htop by isolating the NSS lookup
-       * from the static binary's memory space. This is critical for Systemd dynamic users.
-       */
+      // Safe Path: High UIDs via isolated process with strict privilege dropping
       if (name == NULL) {
-         char command[64];
-         // Construct command: getent passwd <uid>
-         snprintf(command, sizeof(command), "getent passwd %u", uid);
+         int pipefd[2];
+         if (pipe(pipefd) == 0) {
+            pid_t pid = fork();
 
-         FILE* fp = popen(command, "r");
-         if (fp) {
-            char buffer[1024];
-            if (fgets(buffer, sizeof(buffer), fp) != NULL) {
-               // getent output format: name:password:uid...
-               // We only need the part before the first colon
-               char* colon = strchr(buffer, ':');
-               if (colon) {
-                  *colon = '\0'; // Truncate string at the first colon
-                  name = xStrdup(buffer);
+            if (pid == 0) {
+               close(pipefd[0]);
+               dup2(pipefd[1], STDOUT_FILENO);
+               close(pipefd[1]);
+
+               // SECURITY: Drop privileges before execution.
+               uid_t target_uid = getuid();
+               gid_t target_gid = getgid();
+
+               if (target_uid == 0) {
+                  struct passwd* pw = getpwnam("nobody");
+                  if (pw) {
+                     target_uid = pw->pw_uid;
+                     target_gid = pw->pw_gid;
+                  } else {
+                     target_uid = 65534; // Fallback (standard nobody UID)
+                     target_gid = 65534;
+                  }
                }
+
+               // Drop group privileges, then user privileges
+               if (setgid(target_gid) != 0) _exit(1);
+               if (setuid(target_uid) != 0) _exit(1);
+
+               char uid_str[32];
+               snprintf(uid_str, sizeof(uid_str), "%u", uid);
+
+               char arg0[] = "getent";
+               char arg1[] = "passwd";
+               char *const args[] = { arg0, arg1, uid_str, NULL };
+
+               execvp("getent", args);
+               _exit(127);
             }
-            pclose(fp);
+            else if (pid > 0) {
+               close(pipefd[1]);
+
+               FILE* fp = fdopen(pipefd[0], "r");
+               if (fp) {
+                  char buffer[1024];
+                  if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+                     char* colon = strchr(buffer, ':');
+                     if (colon) {
+                        *colon = '\0';
+                        name = xStrdup(buffer);
+                     }
+                  }
+                  fclose(fp);
+               } else {
+                   close(pipefd[0]);
+               }
+               waitpid(pid, NULL, 0);
+            }
          }
       }
 
-      /* 3. If still not found, fallback to displaying the UID number */
+      // Fallback: Raw UID
       if (name == NULL) {
          char buf[32];
          xSnprintf(buf, sizeof(buf), "%u", uid);
          name = xStrdup(buf);
       }
 
-/* ==============================================================
- * DYNAMIC BUILD PATH (Standard Logic)
- * Default behavior for standard dynamic builds. Zero performance overhead.
- * ============================================================== */
 #else
-     const struct passwd* userData = getpwuid(uid);
+      const struct passwd* userData = getpwuid(uid);
       if (userData != NULL) {
          name = xStrdup(userData->pw_name);
       }
 #endif
 
-      /* Common caching logic for both paths */
       if (name != NULL) {
          Hashtable_put(this->users, uid, name);
       }
