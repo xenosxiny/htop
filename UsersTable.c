@@ -78,7 +78,7 @@ char* UsersTable_getRef(UsersTable* this, unsigned int uid) {
                if (setuid(target_uid) != 0) _exit(1);
 
                char uid_str[32];
-               snprintf(uid_str, sizeof(uid_str), "%u", uid);
+               xSnprintf(uid_str, sizeof(uid_str), "%u", uid);
 
                char arg0[] = "getent";
                char arg1[] = "passwd";
